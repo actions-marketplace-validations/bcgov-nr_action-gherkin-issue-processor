@@ -20,43 +20,74 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: Action Test
-    permissions:
-      contents: read
-    uses: ./.github/workflows/reusable-tests.yml
-
   publish:
     name: Publish
+    env:
+      branch: temp-${{ github.run_number }}
     runs-on: ubuntu-24.04
-    needs: [test]
     permissions:
       contents: write
       actions: write
       attestations: write
     steps:
-      - name: Checkout
-        id: checkout
-        uses: actions/checkout@v4
-
-      - name: Conventional Changelog Update
-        uses: TriPSs/conventional-changelog-action@v5
-        id: changelog
-        with:
-          github-token: ${{ github.token }}
-          output-file: 'CHANGELOG.md'
-          skip-version-file: 'true'
-          skip-commit: 'true'
-          git-push: 'true'
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        if: ${{ steps.changelog.outputs.tag != '' }}
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - name: Get Semver
+        id: semver
         continue-on-error: true
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
+        uses: ietf-tools/semver-action@c90370b2958652d71c06a3484129a4d423a6d8a8
         with:
           token: ${{ github.token }}
-          tag_name: ${{ steps.changelog.outputs.tag }}
-          name: ${{ steps.changelog.outputs.tag }}
-          body: ${{ steps.changelog.outputs.clean_changelog }}
+
+      - name: Git Setup
+        if: steps.semver.outputs.next
+        run: |
+          git config --global user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+          git config --global user.name "${GITHUB_ACTOR}"
+          git checkout -b ${{ env.branch }}
+
+      - name: Rebuild ./dist
+        if: steps.semver.outputs.next
+        run: |
+          npm ci
+          npm run bundle
+          git add ./dist --force
+          git commit -m "Rebuild dist/ directory"
+          git push -u origin HEAD:${{ env.branch }}
+
+      - name: Tag and Release (Major)
+        if: steps.semver.outputs.next
+        env:
+          GH_TOKEN: ${{ github.token }}
+          tag: ${{ steps.semver.outputs.nextMajor }}
+        run: |
+          git tag -f ${{ env.tag }}
+          git push -f origin tag ${{ env.tag }}
+
+          if [ $(gh release view ${{ env.tag }} --json name -q .name) ]; then
+            gh release edit ${{ env.tag }} --title ${{ env.tag }} --tag ${{ env.tag }}
+          else
+            gh release create ${{ env.tag }} --title ${{ env.tag }} --generate-notes
+          fi
+
+      - name: Tag and Release (Semver)
+        if: steps.semver.outputs.next
+        env:
+          GH_TOKEN: ${{ github.token }}
+          tag: ${{ steps.semver.outputs.next }}
+        run: |
+          git tag ${{ env.tag }}
+          git push origin tag ${{ env.tag }}
+
+          if [ $(gh release view ${{ env.tag }} --json name -q .name) ]; then
+            gh release delete ${{ env.tag }} --yes
+          fi
+          gh release create ${{ env.tag }} --title ${{ env.tag }} --generate-notes
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ "$(git ls-remote origin ${{ env.branch }})" ]; then
+            git push --delete origin ${{ env.branch }}
+          else
+            echo "Cleanup not required"
+          fi

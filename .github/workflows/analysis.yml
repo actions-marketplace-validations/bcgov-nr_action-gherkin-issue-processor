@@ -1,0 +1,112 @@
+name: Analysis
+
+on:
+  pull_request:
+  push:
+    branches: main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  test-action:
+    name: GitHub Actions Test
+    if: (! github.event.pull_request.draft)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Install Dependencies and Build Dist
+        run: |
+          npm ci
+          npm run bundle
+      - name: Test Local Action
+        id: test-action
+        uses: ./
+        with:
+          issue: 1
+
+      - name: Print Output
+        run: |
+          echo "${{ steps.test-action.outputs.feature }}"
+          echo "${{ steps.test-action.outputs.feature }}" > .github/ci.feature
+
+      - name: Validate Feature
+        run: |
+          # Check if the content of .github/ci.feature is the same as the .github/sample.feature file and fail if is not
+          diff .github/ci.feature .github/sample.feature
+
+      - name: Upload generated feature on failure
+        if: failure()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        with:
+          name: CI Feature
+          path: .github/ci.feature
+
+  test-typescript:
+    name: TypeScript Tests
+    if: (! github.event.pull_request.draft)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - uses: actions/setup-node@395ad3262231945c25e8478fd5baf05154b1d79f # v6
+        with:
+          node-version-file: .node-version
+          cache: npm
+
+      - name: Install Dependencies and Build Dist
+        run: |
+          npm ci
+          npm run bundle
+
+      - name: Check Format
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run coverage
+
+  # https://github.com/marketplace/actions/aqua-security-trivy
+  trivy:
+    name: Trivy Security Scan
+    if: (! github.event.pull_request.draft)
+    permissions:
+      security-events: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1
+    steps:
+      - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
+      - name: Run Trivy vulnerability scanner in repo mode
+        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8
+        with:
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          ignore-unfixed: true
+          scan-type: 'fs'
+          scanners: 'vuln,secret,config'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@cf1bb45a277cb3c205638b2cd5c984db1c46a412 # v4
+        with:
+          sarif_file: 'trivy-results.sarif'
+
+  results:
+    name: Analysis Results
+    needs: [test-action, test-typescript, trivy]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - if:
+          contains(needs.*.result, 'failure')||contains(needs.*.result,
+          'canceled')
+        run: echo "At least one job has failed." && exit 1
+      - run: echo "Success!"
